@@ -29,10 +29,10 @@ df_results = analyse_maneuvers(66748)
 ```
 
 This will:
-1. Download orbital element history for NORAD 66748 from CelesTrak
+1. Download orbital element history for NORAD XXXXX from CelesTrak
 2. Download the Kp geomagnetic index from GFZ Potsdam
 3. Detect manoeuvres and cross-check against space weather
-4. Print a summary and save a plot to `maneuver_detection_66748.png`
+4. Print a summary and save a plot to `maneuver_detection_XXXXX.png`
 
 ---
 
@@ -86,7 +86,7 @@ Returns a `DataFrame` with one row per epoch pair and the following columns:
 | `delta_ecc` | Smoothed eccentricity change |
 | `delta_inc` | Smoothed inclination change (degrees) |
 | `excess_delta_sma` | SMA change above background drift (km) |
-| `drift_rate_sma` | Background SMA drift rate (km/day) from ±7-day linear fit |
+| `drift_rate_sma` | Background SMA drift rate (km/day) from ±3-day linear fit |
 | `kp` | Kp value for the 3-hour interval containing `epoch_from` |
 | `bad_space_weather` | `True` if Kp ≥ kp_threshold |
 | `likely_maneuver` | `True` if excess_delta_sma or delta_ecc exceeds threshold |
