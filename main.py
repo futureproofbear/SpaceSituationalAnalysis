@@ -158,6 +158,10 @@ def analyse_maneuvers(catnr: int, data_dir: str = "./data", max_age_days: int = 
     if missing:
         raise ValueError(f"Missing columns in orbit data: {missing}")
 
+    # ── 1. Smooth orbital elements with rolling median to reduce TLE noise ────
+    for col in ['SMA', 'Eccentricity', 'Inclination', 'RAAN', 'Arg of Perigee']:
+        df[f'{col}_smooth'] = df[col].rolling(3, center=True, min_periods=1).median()
+
     # ── Compute epoch pair deltas ─────────────────────────────────────────────
     results = []
     for i in range(len(df) - 1):
@@ -175,14 +179,36 @@ def analyse_maneuvers(catnr: int, data_dir: str = "./data", max_age_days: int = 
                                         row_next['Inclination'], row_next['RAAN'],
                                         row_next['Arg of Perigee'], row_next['Mean Anomaly'])
 
+        # Use smoothed values for delta computation (improvement 1)
+        delta_sma = row_next['SMA_smooth'] - row_now['SMA_smooth']
+        delta_ecc = row_next['Eccentricity_smooth'] - row_now['Eccentricity_smooth']
+        delta_inc = row_next['Inclination_smooth'] - row_now['Inclination_smooth']
+
+        # ── 2. Background drift rate over ±3 days ────────────────────────────
+        window = df[(df['Date'] >= row_now['Date'] - pd.Timedelta(days=3)) &
+                    (df['Date'] <= row_now['Date'] + pd.Timedelta(days=3))]
+        if len(window) >= 3:
+            drift_rate_sma = np.polyfit(
+                (window['Date'] - row_now['Date']).dt.total_seconds() / 86400,
+                window['SMA_smooth'], deg=1
+            )[0]  # km/day
+        else:
+            drift_rate_sma = 0.0
+
+        # Excess delta = observed change minus expected background drift
+        expected_sma_drift = drift_rate_sma * gap_days
+        excess_delta_sma   = delta_sma - expected_sma_drift
+
         results.append({
-            'epoch_from': row_now['Date'],
-            'epoch_to':   row_next['Date'],
-            'gap_days':   round(gap_days, 3),
-            'error_km':   round(np.linalg.norm(pos_predicted - pos_actual), 3),
-            'delta_sma':  round(row_next['SMA'] - row_now['SMA'], 3),
-            'delta_ecc':  round(row_next['Eccentricity'] - row_now['Eccentricity'], 6),
-            'delta_inc':  round(row_next['Inclination'] - row_now['Inclination'], 4),
+            'epoch_from':       row_now['Date'],
+            'epoch_to':         row_next['Date'],
+            'gap_days':         round(gap_days, 3),
+            'error_km':         round(np.linalg.norm(pos_predicted - pos_actual), 3),
+            'delta_sma':        round(delta_sma, 3),
+            'delta_ecc':        round(delta_ecc, 6),
+            'delta_inc':        round(delta_inc, 4),
+            'excess_delta_sma': round(excess_delta_sma, 3),
+            'drift_rate_sma':   round(drift_rate_sma, 4),
         })
 
     result_df = pd.DataFrame(results)
@@ -198,10 +224,10 @@ def analyse_maneuvers(catnr: int, data_dir: str = "./data", max_age_days: int = 
     )
 
     # ── Maneuver classification ───────────────────────────────────────────────
-    result_df['bad_space_weather']  = result_df['kp'] >= kp_threshold
+    result_df['bad_space_weather'] = result_df['kp'] >= kp_threshold
     result_df['likely_maneuver']    = (
-        (result_df['delta_sma'].abs() > delta_sma_threshold) |
-        (result_df['delta_ecc'].abs() > delta_ecc_threshold)
+        (result_df['excess_delta_sma'].abs() > delta_sma_threshold) |
+        (result_df['delta_ecc'].abs()         > delta_ecc_threshold)
     )
     result_df['confirmed_maneuver'] = result_df['likely_maneuver'] & ~result_df['bad_space_weather']
     result_df['uncertain_maneuver'] = result_df['likely_maneuver'] &  result_df['bad_space_weather']
@@ -221,7 +247,10 @@ def analyse_maneuvers(catnr: int, data_dir: str = "./data", max_age_days: int = 
             print(f"  {r['epoch_from']}  →  {r['epoch_to']}  "
                   f"(gap: {r['gap_days']:.3f} days)  "
                   f"ΔSMA: {r['delta_sma']:+.3f} km  "
+                  f"excess ΔSMA: {r['excess_delta_sma']:+.3f} km  "
+                  f"drift: {r['drift_rate_sma']:+.4f} km/day  "
                   f"ΔEcc: {r['delta_ecc']:+.2e}  "
+                  f"ΔInc: {r['delta_inc']:+.4f}°  "
                   f"Kp: {r['kp']:.1f}  [{label}]")
 
     if result_df['confirmed_maneuver'].any():
@@ -235,16 +264,19 @@ def analyse_maneuvers(catnr: int, data_dir: str = "./data", max_age_days: int = 
     # ── Plot ──────────────────────────────────────────────────────────────────
     fig, axes = plt.subplots(4, 1, figsize=(13, 12), sharex=True)
 
-    # Panel 1: ΔSMA
-    axes[0].plot(result_df['epoch_to'], result_df['delta_sma'], marker='o', markersize=3, color='darkorange')
+    # Panel 1: ΔSMA (raw and excess over background drift)
+    axes[0].plot(result_df['epoch_to'], result_df['delta_sma'],
+                 marker='o', markersize=3, color='darkorange', label='ΔSMA (smoothed)', alpha=0.6)
+    axes[0].plot(result_df['epoch_to'], result_df['excess_delta_sma'],
+                 marker='o', markersize=3, color='saddlebrown', label='Excess ΔSMA (above drift)')
     axes[0].axhline(0, color='gray', linestyle='--')
     axes[0].axhline( delta_sma_threshold, color='red', linestyle=':', linewidth=1, label=f'±{delta_sma_threshold} km')
     axes[0].axhline(-delta_sma_threshold, color='red', linestyle=':', linewidth=1)
     axes[0].scatter(result_df[result_df['confirmed_maneuver']]['epoch_to'],
-                    result_df[result_df['confirmed_maneuver']]['delta_sma'],
+                    result_df[result_df['confirmed_maneuver']]['excess_delta_sma'],
                     color='red', zorder=5, label='Confirmed maneuver')
     axes[0].scatter(result_df[result_df['uncertain_maneuver']]['epoch_to'],
-                    result_df[result_df['uncertain_maneuver']]['delta_sma'],
+                    result_df[result_df['uncertain_maneuver']]['excess_delta_sma'],
                     color='orange', zorder=5, marker='^', label='Uncertain (bad weather)')
     axes[0].set_ylabel('ΔSMA (km)')
     axes[0].set_title(f'Maneuver Detection — CATNR {catnr}')
@@ -440,8 +472,5 @@ def get_kp_index(start_date: str, end_date: str, data_dir: str = "./data") -> pd
 # ── Run ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    df_results = analyse_maneuvers(66748, data_dir="./data")
+    df_results = analyse_maneuvers(60547, data_dir="./data", delta_sma_threshold=0.1, delta_ecc_threshold=5e-5)
 
-    print(df_results[['epoch_from', 'epoch_to', 'delta_sma', 'delta_ecc',
-                       'kp', 'confirmed_maneuver', 'uncertain_maneuver']]
-          .to_string(index=False))
